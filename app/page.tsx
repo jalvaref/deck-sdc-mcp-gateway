@@ -1,0 +1,1 @@
+export default function Home() { return <main style={{fontFamily:'system-ui',maxWidth:760,margin:'80px auto',padding:24}}><h1>TotalEnergies SDC MCP Gateway</h1><p>Endpoint MCP disponible en <code>/api/mcp</code>.</p><p>Modo seguro: Drupal solo recibe contenido en estado draft.</p></main>; }
