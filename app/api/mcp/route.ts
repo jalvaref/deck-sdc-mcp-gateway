@@ -28,7 +28,8 @@ async function github(path: string, init: RequestInit = {}) {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error('GITHUB_TOKEN no configurado.');
   const response = await fetch(`https://api.github.com${path}`, { ...init, headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'x-github-api-version': '2022-11-28', 'content-type': 'application/json', ...(init.headers ?? {}) }, cache: 'no-store' });
-  const data = await response.json();
+  const raw = await response.text();
+  const data = raw ? JSON.parse(raw) : {};
   if (!response.ok) throw new Error(`GitHub ${response.status}: ${JSON.stringify(data)}`);
   return data;
 }
