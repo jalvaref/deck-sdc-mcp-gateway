@@ -20,3 +20,14 @@ npm run dev
 
 Health check: `http://localhost:3000/api/health`.
 MCP endpoint: `http://localhost:3000/api/mcp`.
+
+## GitHub pull requests
+
+`create_github_pull_request` uses the Git Data API to create blobs, one commit, a
+`codex/landing-<slug>` branch and a pull request against `main`. It accepts
+`files` as objects with `path` plus either UTF-8 `content` or `content_base64`.
+
+The operation is dry-run unless `MCP_DRY_RUN=false`. For a live operation the
+gateway needs `GITHUB_TOKEN` with repository contents and pull-request access.
+The MCP caller must also send `confirm: true`; the gateway validates paths and
+file-size limits and reuses an existing open PR for the same branch.
