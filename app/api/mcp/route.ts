@@ -54,6 +54,7 @@ function normalizeFiles(input: unknown) {
     const contentBase64 = hasBase64 ? item.content_base64 as string : Buffer.from(item.content as string, 'utf8').toString('base64');
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64) || contentBase64.length % 4 !== 0) throw new Error(`content_base64 inválido en ${path}.`);
     const bytes = Buffer.from(contentBase64, 'base64').byteLength;
+    if (bytes === 0) throw new Error(`${path} está vacío.`);
     if (bytes > maxFileBytes) throw new Error(`${path} supera el límite de ${maxFileBytes} bytes.`);
     total += bytes;
     if (total > maxTotalBytes) throw new Error(`El conjunto de archivos supera el límite de ${maxTotalBytes} bytes.`);
@@ -68,18 +69,27 @@ async function createPullRequest(args: Record<string, unknown>, runId: string) {
   const title = String(args.title || `Landing SDC: ${runId}`);
   const body = String(args.body || `Contribución generada por el agente SDC para la ejecución ${runId}.\n\nDrupal se importará como draft tras la aprobación correspondiente.`);
   if (title.length > 200 || body.length > 20_000) throw new Error('title o body supera su límite de tamaño.');
+  const proposalFile = files.find((file) => file.path.endsWith('/proposal.json') || file.path === 'proposal.json');
+  if (proposalFile) {
+    let proposal: { run_id?: unknown; status?: unknown };
+    try { proposal = JSON.parse(Buffer.from(proposalFile.contentBase64, 'base64').toString('utf8')); } catch { throw new Error('proposal.json no contiene JSON válido.'); }
+    if (proposal.run_id !== runId) throw new Error('proposal.json no coincide con run_id.');
+    if (proposal.status !== 'sdc_approved') throw new Error('proposal.json debe estar en sdc_approved.');
+  }
+  const previewFile = files.find((file) => file.path.endsWith('/preview/index.html') || file.path === 'preview/index.html');
+  if (previewFile && !Buffer.from(previewFile.contentBase64, 'base64').toString('utf8').trim()) throw new Error('preview/index.html está vacío.');
   if (dryRun) return { dry_run: true, action: 'create_github_pull_request', run_id: runId, repository, baseBranch, branch, files: files.map(({ path, bytes }) => ({ path, bytes })), title };
 
   const baseRef = await github(`/repos/${repository}/git/ref/heads/${encodeURIComponent(baseBranch)}`);
   const baseSha = baseRef.object?.sha;
   if (!baseSha) throw new Error('No se pudo resolver la rama base en GitHub.');
   const baseCommit = await github(`/repos/${repository}/git/commits/${baseSha}`);
-  const treeEntries = [];
+  const treeEntries: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string; bytes: number }> = [];
   for (const file of files) {
     const blob = await github(`/repos/${repository}/git/blobs`, { method: 'POST', body: JSON.stringify({ content: file.contentBase64, encoding: 'base64' }) });
-    treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha: blob.sha });
+    treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha: blob.sha, bytes: file.bytes });
   }
-  const tree = await github(`/repos/${repository}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: baseCommit.tree.sha, tree: treeEntries }) });
+  const tree = await github(`/repos/${repository}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: baseCommit.tree.sha, tree: treeEntries.map(({ path, mode, type, sha }) => ({ path, mode, type, sha })) }) });
   const commit = await github(`/repos/${repository}/git/commits`, { method: 'POST', body: JSON.stringify({ message: title, tree: tree.sha, parents: [baseSha] }) });
   let branchExists = true;
   try { await github(`/repos/${repository}/git/ref/heads/${encodeURIComponent(branch)}`); } catch (error) {
@@ -88,13 +98,20 @@ async function createPullRequest(args: Record<string, unknown>, runId: string) {
   }
   if (branchExists) await github(`/repos/${repository}/git/refs/heads/${encodeURIComponent(branch)}`, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }) });
   else await github(`/repos/${repository}/git/refs`, { method: 'POST', body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commit.sha }) });
+  const verifiedFiles = [];
+  for (const file of treeEntries) {
+    const contentPath = file.path.split('/').map(encodeURIComponent).join('/');
+    const remote = await github(`/repos/${repository}/contents/${contentPath}?ref=${encodeURIComponent(branch)}`);
+    if (remote.sha !== file.sha) throw new Error(`Verificación remota fallida para ${file.path}.`);
+    verifiedFiles.push({ path: file.path, bytes: file.bytes, sha: remote.sha });
+  }
   const openPulls = await github(`/repos/${repository}/pulls?state=open&head=${encodeURIComponent(repository.split('/')[0] + ':' + branch)}&base=${encodeURIComponent(baseBranch)}`);
   if (Array.isArray(openPulls) && openPulls.length > 0) {
     const existing = openPulls[0];
-    return { requested: true, existing: true, action: 'create_github_pull_request', run_id: runId, repository, baseBranch, branch, commit_sha: commit.sha, pull_request: { number: existing.number, url: existing.html_url, state: existing.state } };
+    return { requested: true, existing: true, action: 'create_github_pull_request', run_id: runId, repository, baseBranch, branch, commit_sha: commit.sha, verified_files: verifiedFiles, pull_request: { number: existing.number, url: existing.html_url, state: existing.state } };
   }
   const pull = await github(`/repos/${repository}/pulls`, { method: 'POST', body: JSON.stringify({ title, head: branch, base: baseBranch, body }) });
-  return { requested: true, action: 'create_github_pull_request', run_id: runId, repository, baseBranch, branch, commit_sha: commit.sha, pull_request: { number: pull.number, url: pull.html_url, state: pull.state } };
+  return { requested: true, action: 'create_github_pull_request', run_id: runId, repository, baseBranch, branch, commit_sha: commit.sha, verified_files: verifiedFiles, pull_request: { number: pull.number, url: pull.html_url, state: pull.state } };
 }
 
 async function dispatch(action: string, runId: string) {
